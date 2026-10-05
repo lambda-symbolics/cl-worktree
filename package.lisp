@@ -5,6 +5,9 @@
            #:create-worktree #:discover-worktrees #:cleanup-worktree
            #:artifact #:artifact-kind #:artifact-baseline #:artifact-tip
            #:artifact-content #:artifact-paths #:extract-patch #:extract-commit-range
+           #:artifact->plist #:plist->artifact #:artifact-owner #:artifact-source
+           #:artifact-common-git-directory #:artifact-isolated-path #:artifact-worktree-id
+           #:artifact-patch #:artifact-patch-reference
            #:check-patch #:apply-patch #:apply-commit-range #:integration-conflicts
            #:abort-integration #:worktree-error #:failure-operation #:failure-detail
            #:command-failure #:failure-command #:failure-exit-code
