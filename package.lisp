@@ -3,6 +3,7 @@
   (:export #:make-manager #:manager #:worktree #:worktree-path #:worktree-source
            #:worktree-id #:worktree-owner #:worktree-baseline #:worktree-state
            #:create-worktree #:discover-worktrees #:cleanup-worktree
+           #:use-committed-baseline #:retain-worktree #:retry-cleanup
            #:artifact #:artifact-kind #:artifact-baseline #:artifact-tip
            #:artifact-content #:artifact-paths #:extract-patch #:extract-commit-range
            #:artifact->plist #:plist->artifact #:artifact-owner #:artifact-source

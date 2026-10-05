@@ -65,6 +65,12 @@ directory identity marker. Dirty worktrees raise `dirty-workspace`; explicit
 and other worktrees are not deleted or pruned. Failed removal raises
 `cleanup-failure` and retains the registry for retry.
 
+Recoverable lifecycle failures expose explicit restarts. During dirty-source
+creation, `use-committed-baseline` selects the same behavior as `:ignore`.
+During cleanup, `retain-worktree` returns NIL without continuing removal;
+`retry-cleanup` retries after repair and revalidates ownership. Successful cleanup
+returns T. Restarts never authorize discarding child edits implicitly.
+
 Ownership protects against accidental deletion, not hostile modifications by
 another process with access to the registry and Git metadata.
 

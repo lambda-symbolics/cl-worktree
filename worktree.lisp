@@ -231,7 +231,11 @@ Existing paths are never reused. SOURCE is never checked out, reset, or stashed.
                    unless (probe-file (%record-path manager candidate)) return candidate)))
     (when (probe-file destination)
       (error 'ownership-error :operation :create :detail "Destination already exists"))
-    (when (eq dirty-policy :reject) (%clean manager root))
+    (when (eq dirty-policy :reject)
+      (restart-case (%clean manager root)
+        (use-committed-baseline ()
+          :report "Use the committed baseline, excluding all dirty source changes."
+          nil)))
     (%run manager root (list "worktree" "add" "--detach" "--" destination revision))
     (handler-case
         (let ((worktree (make-worktree :id id :owner owner :source root
@@ -282,25 +286,32 @@ Discovery is read-only and never claims unmarked or foreign worktrees."
       (values selected (remove-if (lambda (tree) (probe-file (worktree-path tree))) selected)))))
 
 (defun cleanup-worktree (manager worktree &key owner discard-dirty)
-  "Remove only verified owned worktrees, retaining metadata on cleanup failure.
-Explicit DISCARD-DIRTY permits Git --force. Absent, externally pruned worktrees
-only retire the registry; unrelated Git metadata is never globally pruned."
-  (let ((status (%owned manager worktree owner :absent-ok t)))
-    (handler-case
-        (progn
-          (unless (eq status :retired)
-            (when (probe-file (worktree-path worktree))
-              (unless discard-dirty (%clean manager (worktree-path worktree))))
-            (%run manager (worktree-source worktree)
-                  (append '("worktree" "remove") (when discard-dirty '("--force"))
-                          (list "--" (worktree-path worktree)))))
-          (let ((record (%record-path manager (worktree-id worktree))))
-            (when (probe-file record) (delete-file record)))
-          (setf (worktree-state worktree) :removed)
-          t)
-      (dirty-workspace (condition) (error condition))
-      (error (condition)
-        (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition))))))
+  "Remove verified owned worktrees, returning T on removal or NIL on RETAIN-WORKTREE.
+Explicit DISCARD-DIRTY permits Git --force. RETRY-CLEANUP revalidates ownership;
+RETAIN-WORKTREE leaves recoverable failures registered without discarding edits."
+  (restart-case
+      (let ((status (%owned manager worktree owner :absent-ok t)))
+        (handler-case
+            (progn
+              (unless (eq status :retired)
+                (when (probe-file (worktree-path worktree))
+                  (unless discard-dirty (%clean manager (worktree-path worktree))))
+                (%run manager (worktree-source worktree)
+                      (append '("worktree" "remove") (when discard-dirty '("--force"))
+                              (list "--" (worktree-path worktree)))))
+              (let ((record (%record-path manager (worktree-id worktree))))
+                (when (probe-file record) (delete-file record)))
+              (setf (worktree-state worktree) :removed)
+              t)
+          (dirty-workspace (condition) (error condition))
+          (error (condition)
+            (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition)))))
+    (retain-worktree ()
+      :report "Retain the owned worktree and its registry without discarding edits."
+      nil)
+    (retry-cleanup ()
+      :report "Retry cleanup after repairing the failure, revalidating ownership."
+      (cleanup-worktree manager worktree :owner owner :discard-dirty discard-dirty))))
 
 (defun %split-zero (text)
   "Split Git's NUL-delimited names, preserving spaces and newlines."
