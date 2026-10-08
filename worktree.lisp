@@ -402,7 +402,7 @@ Untracked files are rejected: stage new deliverable files before extraction."
   (%run manager path (list "merge-base" "--is-ancestor" base tip))
   (remove "" (uiop:split-string
               (%trim (%run manager path (list "rev-list" "--topo-order" "--reverse"
-                                             (format nil "~A..~A" base tip))))
+                                             (format nil "~A..~A" base tip) "--")))
               :separator '(#\Newline))
           :test #'equal))
 

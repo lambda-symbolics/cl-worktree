@@ -126,6 +126,7 @@
            (run-provenance-tests manager root source)
            (run-rollback-tests manager root source)
            (run-restart-tests manager root source)
+           (run-revision-disambiguation-tests manager source)
            (format t "~D cl-worktree checks passed.~%" *checks*)
            t)
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
@@ -428,3 +429,14 @@
         (verify (null (discover-worktrees manager)))))
     (verify (equal base (%revision manager source "HEAD")))
     (%clean manager source)))
+
+(defun run-revision-disambiguation-tests (manager source)
+  "Enumerate the requested commits even when a file has the range's spelling."
+  (let* ((base (%revision manager source "HEAD^"))
+         (tip (%revision manager source "HEAD"))
+         (collision (merge-pathnames (format nil "~A..~A" base tip) source)))
+    (unwind-protect
+         (progn
+           (write-text collision "revision-name collision")
+           (verify (equal (list tip) (%commits manager source base tip))))
+      (delete-file collision))))
