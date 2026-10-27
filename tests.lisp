@@ -1,6 +1,7 @@
 (in-package #:cl-worktree)
 
-(defvar *checks* 0)
+(defvar *checks* 0
+  "The number of assertions the current test run has made.")
 
 (defun test-runner (argv &key directory input)
   "Execute real Git with a string input stream and capture all three results."
