@@ -1,5 +1,6 @@
 (defpackage #:cl-worktree
   (:use #:cl)
+  (:documentation "Owned, detached Git worktrees and the patches and commit ranges taken from them.")
   (:export #:make-manager #:manager #:worktree #:worktree-path #:worktree-source
            #:worktree-id #:worktree-owner #:worktree-baseline #:worktree-state
            #:create-worktree #:discover-worktrees #:cleanup-worktree
