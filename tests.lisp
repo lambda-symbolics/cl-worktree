@@ -6,7 +6,7 @@
 (defun test-runner (argv &key directory input)
   "Execute real Git with a string input stream and capture all three results."
   (uiop:run-program argv :directory directory
-                    :input (if input (make-string-input-stream input) :interactive)
+                    :input          (if input (make-string-input-stream input) :interactive)
                     :output :string :error-output :string :ignore-error-status t))
 
 (defun verify (value)
@@ -32,11 +32,11 @@
 (defun run-tests ()
   "Exercise real temporary Git repositories, failures and durable ownership."
   (let* ((*checks* 0)
-         (root (merge-pathnames (format nil "cl-worktree-tests-~36R/" (random (expt 2 80)))
-                               (uiop:temporary-directory)))
-         (source (merge-pathnames "source/" root))
+         (root     (merge-pathnames (format nil "cl-worktree-tests-~36R/" (random (expt 2 80)))
+                                   (uiop:temporary-directory)))
+         (source   (merge-pathnames "source/" root))
          (registry (merge-pathnames "registry/" root))
-         (manager (make-manager :runner #'test-runner :registry registry)))
+         (manager  (make-manager :runner #'test-runner :registry registry)))
     (unwind-protect
          (progn
            (ensure-directories-exist (merge-pathnames "probe" source))
@@ -47,11 +47,11 @@
            (%run manager source '("config" "user.name" "Worktree Tests"))
            (%run manager source '("config" "user.email" "tests@example.invalid"))
            (commit-text manager source (format nil "base~%") :message "baseline")
-           (let* ((base (%revision manager source "HEAD"))
+           (let* ((base   (%revision manager source "HEAD"))
                   (branch (%trim (%run manager source '("symbolic-ref" "HEAD"))))
-                  (tree (create-worktree manager :source source
-                                         :path (merge-pathnames "child" root)
-                                         :baseline base :owner "task")))
+                  (tree   (create-worktree manager :source source
+                                           :path           (merge-pathnames "child" root)
+                                           :baseline base :owner "task")))
              (verify (equal base (worktree-baseline tree)))
              (verify (= 1 (length (discover-worktrees manager :owner "task"))))
              (verify (null (discover-worktrees manager :owner "other")))
@@ -65,9 +65,9 @@
                (create-worktree manager :source source :path (merge-pathnames "dirty" root)
                                 :baseline base :owner "task"))
              (let ((ignored (create-worktree manager :source source
-                                             :path (merge-pathnames "ignored" root)
+                                             :path           (merge-pathnames "ignored" root)
                                              :baseline base :owner "task"
-                                             :dirty-policy :ignore)))
+                                             :dirty-policy   :ignore)))
                (verify (not (probe-file (merge-pathnames "untracked"
                                                        (uiop:ensure-directory-pathname
                                                         (worktree-path ignored))))))
@@ -105,11 +105,11 @@
                ;; Cleanup errors preserve the durable handle for retry.
                (let ((failing (make-manager
                                :registry registry
-                               :runner (lambda (argv &key directory input)
-                                        (if (equal "remove"
-                                                   (second (member "worktree" argv :test #'equal)))
-                                             (values "" "injected removal failure" 1)
-                                             (test-runner argv :directory directory :input input))))))
+                               :runner   (lambda (argv &key directory input)
+                                          (if (equal "remove"
+                                                     (second (member "worktree" argv :test #'equal)))
+                                              (values "" "injected removal failure" 1)
+                                              (test-runner argv :directory directory :input input))))))
                  (fails cleanup-failure (cleanup-worktree failing tree :owner "task"))
                  (verify (= 1 (length (discover-worktrees manager)))))
                ;; A replacement marker must never authorize deletion.
@@ -142,10 +142,10 @@
     (fails worktree-error
       (create-worktree manager :source source :path (merge-pathnames "invalid" root)
                        :baseline base :owner "edge" :dirty-policy :invented))
-    (let* ((tree (create-worktree manager :source source
-                                  :path (merge-pathnames "with spaces/" root)
-                                  :baseline base :owner "edge"))
-           (path (uiop:ensure-directory-pathname (worktree-path tree)))
+    (let* ((tree   (create-worktree manager :source source
+                                    :path           (merge-pathnames "with spaces/" root)
+                                    :baseline base :owner "edge"))
+           (path   (uiop:ensure-directory-pathname (worktree-path tree)))
            (before (%run manager source '("status" "--porcelain" "-z"))))
       (verify (null (artifact-content (extract-commit-range manager tree :owner "edge"))))
       (verify (apply-commit-range manager source (extract-commit-range manager tree :owner "edge")))
@@ -162,10 +162,10 @@
         (fails dirty-workspace (apply-patch manager source ""))
         (%run manager source '("reset" "--hard" "HEAD")))
       (%run manager path '("reset" "--hard" "HEAD"))
-      (let* ((name (format nil "binary~%name"))
+      (let* ((name  (format nil "binary~%name"))
              (bytes #(0 255 2 128 10 0)))
         (with-open-file (stream (merge-pathnames name path) :direction :output
-                                :element-type '(unsigned-byte 8))
+                                :element-type                          '(unsigned-byte 8))
           (write-sequence bytes stream))
         (%run manager path (list "add" "--" name))
         (let ((patch (extract-patch manager tree :owner "edge")))
@@ -181,7 +181,7 @@
       (write-text (merge-pathnames "file" source) "staged source")
       (%run manager source '("add" "file"))
       (write-text (merge-pathnames "file" source) "unstaged source")
-      (let* ((status (%run manager source '("status" "--porcelain" "-z")))
+      (let* ((status  (%run manager source '("status" "--porcelain" "-z")))
              (ignored (create-worktree manager :source source :path (merge-pathnames "index-dirty" root)
                                       :baseline base :owner "edge" :dirty-policy :ignore)))
         (verify (equal status (%run manager source '("status" "--porcelain" "-z"))))
@@ -241,7 +241,7 @@
          (path (uiop:ensure-directory-pathname (worktree-path tree))))
     (write-text (merge-pathnames "file" path) "portable uncommitted change")
     (let* ((artifact (extract-patch manager tree :owner "portable"))
-           (data (artifact->plist artifact :patch-reference "artifact:secured-patch"))
+           (data     (artifact->plist artifact :patch-reference "artifact:secured-patch"))
            (restored (plist->artifact data)))
       (verify (equal "portable" (getf data :owner)))
       (verify (equal (worktree-id tree) (getf data :worktree-id)))
@@ -276,7 +276,7 @@
       (%run manager range-path '("commit" "-m" "first"))
       (commit-text manager range-path "second change" :message "second")
       (let* ((artifact (extract-commit-range manager range-tree :owner "range"))
-             (data (artifact->plist artifact))
+             (data     (artifact->plist artifact))
              (restored (plist->artifact data)))
         (verify (= 2 (length (getf data :commits))))
         (verify (equal data (artifact->plist restored)))
@@ -343,23 +343,23 @@
         (delete-file marker)))
     (dolist (dirty '(nil t))
       (let* ((destination (namestring (merge-pathnames (if dirty "rollback-dirty" "rollback-clean") root)))
-             (created nil)
-             (injected (make-manager
-                        :registry (manager-registry manager)
-                        :runner (lambda (argv &key directory input)
-                                  (if (and created (equal directory destination)
-                                           (member "rev-parse" argv :test #'equal))
-                                      (values "" "injected post-create inspection failure" 1)
-                                      (multiple-value-bind (out err code)
-                                          (test-runner argv :directory directory :input input)
-                                        (when (and (zerop code)
-                                                   (equal "add" (second (member "worktree" argv :test #'equal))))
-                                          (setf created t)
-                                          (when dirty
-                                            (write-text (merge-pathnames "valuable"
-                                                                       (uiop:ensure-directory-pathname destination))
-                                                        "must survive")))
-                                        (values out err code)))))))
+             (created     nil)
+             (injected    (make-manager
+                           :registry (manager-registry manager)
+                           :runner   (lambda (argv &key directory input)
+                                       (if (and created (equal directory destination)
+                                                (member "rev-parse" argv :test #'equal))
+                                           (values "" "injected post-create inspection failure" 1)
+                                           (multiple-value-bind (out err code)
+                                               (test-runner argv :directory directory :input input)
+                                             (when (and (zerop code)
+                                                        (equal "add" (second (member "worktree" argv :test #'equal))))
+                                               (setf created t)
+                                               (when dirty
+                                                 (write-text (merge-pathnames "valuable"
+                                                                            (uiop:ensure-directory-pathname destination))
+                                                             "must survive")))
+                                             (values out err code)))))))
         (if dirty
             (progn
               (fails cleanup-failure
@@ -433,8 +433,8 @@
 
 (defun run-revision-disambiguation-tests (manager source)
   "Enumerate the requested commits even when a file has the range's spelling."
-  (let* ((base (%revision manager source "HEAD^"))
-         (tip (%revision manager source "HEAD"))
+  (let* ((base      (%revision manager source "HEAD^"))
+         (tip       (%revision manager source "HEAD"))
          (collision (merge-pathnames (format nil "~A..~A" base tip) source)))
     (unwind-protect
          (progn

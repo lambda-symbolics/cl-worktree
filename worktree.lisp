@@ -16,14 +16,19 @@
    (exit-code :initarg :exit-code :reader failure-exit-code
               :documentation "The unsuccessful integer process exit status."))
   (:documentation "The injected runner returned an unsuccessful Git status."))
+
 (define-condition isolation-unavailable (worktree-error) ()
   (:documentation "The source is not an available Git worktree."))
+
 (define-condition dirty-workspace (worktree-error) ()
   (:documentation "An operation requires a clean index and working directory."))
+
 (define-condition ownership-error (worktree-error) ()
   (:documentation "Identity or repository ownership could not be verified."))
+
 (define-condition cleanup-failure (worktree-error) ()
   (:documentation "Cleanup failed; retained metadata allows inspection and retry."))
+
 (define-condition integration-conflict (worktree-error)
   ((paths :initarg :paths :reader conflict-paths
           :documentation "Unmerged paths, or NIL for a failed non-mutating patch check."))
@@ -32,9 +37,11 @@
 (defstruct (manager (:constructor %make-manager))
   "Command runner and a private durable registry directory."
   runner registry)
+
 (defstruct worktree
   "A detached worktree identity; registry records persist across process restarts."
   id owner source path baseline git-directory (state :active))
+
 (defstruct artifact
   "A portable baseline-relative change artifact with explicit provenance."
   kind baseline tip content paths owner source common-git-directory isolated-path
@@ -151,9 +158,9 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
   "Produce a portable record."
   (list :id (worktree-id worktree) :owner (worktree-owner worktree)
         :source (worktree-source worktree) :path (worktree-path worktree)
-        :baseline (worktree-baseline worktree)
+        :baseline      (worktree-baseline worktree)
         :git-directory (worktree-git-directory worktree)
-        :state (worktree-state worktree)))
+        :state         (worktree-state worktree)))
 
 (defun %write-record (path data)
   "Publish readable metadata atomically."
@@ -168,8 +175,8 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
       (with-open-file (stream path)
         (with-standard-io-syntax
           (let* ((*read-eval* nil)
-                 (end (gensym "END"))
-                 (data (read stream)))
+                 (end         (gensym "END"))
+                 (data        (read stream)))
             (unless (eq end (read stream nil end))
               (error 'ownership-error :operation :metadata :detail "Trailing metadata"))
             data)))
@@ -180,16 +187,16 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
 (defun %registered-paths (manager source)
   "Read registered paths using Git's NUL-delimited porcelain format."
   (loop for field in (%split-zero
-                     (%run manager source '("worktree" "list" "--porcelain" "-z")))
+                      (%run manager source '("worktree" "list" "--porcelain" "-z")))
         when (uiop:string-prefix-p "worktree " field) collect (subseq field 9)))
 
 (defun %owned (manager worktree owner &key absent-ok)
   "Verify registry, owner, registered path and private Git marker before mutation.
 Return :RETIRED only when both the worktree and its Git metadata are absent."
-  (let* ((data (%data worktree))
-         (record (%record-path manager (worktree-id worktree)))
-         (record-p (probe-file record))
-         (marker (%marker-path worktree))
+  (let* ((data       (%data worktree))
+         (record     (%record-path manager (worktree-id worktree)))
+         (record-p   (probe-file record))
+         (marker     (%marker-path worktree))
          (registered (member (worktree-path worktree)
                              (%registered-paths manager (worktree-source worktree))
                              :test #'equal)))
@@ -222,12 +229,12 @@ Existing paths are never reused. SOURCE is never checked out, reset, or stashed.
   (check-type owner string)
   (unless (member dirty-policy '(:reject :ignore))
     (error 'worktree-error :operation :create :detail "Unknown dirty-source policy"))
-  (let* ((root (%source manager source))
+  (let* ((root        (%source manager source))
          (destination (namestring (merge-pathnames path (uiop:getcwd))))
-         (revision (%revision manager root baseline))
-         (id (loop for candidate = (format nil "~36R-~36R" (get-universal-time)
-                                          (random (expt 2 80)))
-                   unless (probe-file (%record-path manager candidate)) return candidate)))
+         (revision    (%revision manager root baseline))
+         (id          (loop for candidate = (format nil "~36R-~36R" (get-universal-time)
+                                                   (random (expt 2 80)))
+                            unless (probe-file (%record-path manager candidate)) return candidate)))
     (when (probe-file destination)
       (error 'ownership-error :operation :create :detail "Destination already exists"))
     (when (eq dirty-policy :reject)
@@ -248,9 +255,10 @@ Existing paths are never reused. SOURCE is never checked out, reset, or stashed.
         (handler-case
             (%run manager root (list "worktree" "remove" "--" destination))
           (error (cleanup-condition)
-            (error 'cleanup-failure :operation :creation-rollback
-                   :detail (format nil "~A; retained ~A: ~A"
-                                   condition destination cleanup-condition))))
+            (error 'cleanup-failure
+                   :operation :creation-rollback
+                   :detail    (format nil "~A; retained ~A: ~A"
+                                      condition destination cleanup-condition))))
         (if (typep condition 'worktree-error)
             (error condition)
             (error 'worktree-error :operation :create :detail (princ-to-string condition)))))))
@@ -262,10 +270,11 @@ Discovery is read-only and never claims unmarked or foreign worktrees."
   (let ((trees (loop for file in (uiop:directory-files (manager-registry manager) "*.sexp")
                     collect (handler-case (apply #'make-worktree (%read-record file))
                               (error (condition)
-                                (error 'ownership-error :operation :discovery
-                                       :detail (princ-to-string condition)))))))
+                                (error 'ownership-error
+                                       :operation :discovery
+                                       :detail    (princ-to-string condition)))))))
     (when source
-      (let* ((root (%source manager source))
+      (let* ((root     (%source manager source))
              (metadata (%trim (%run manager root
                                     '("rev-parse" "--path-format=absolute"
                                       "--git-common-dir")))))
@@ -334,16 +343,19 @@ RETAIN-WORKTREE leaves recoverable failures registered without discarding edits.
   "Return versioned portable data suitable for persistence or JSON conversion.
 PATCH-REFERENCE optionally identifies a separately secured patch; content is retained."
   (list :version 1 :kind (ecase (artifact-kind artifact)
-                          (:patch "patch") (:commit-range "commit-range"))
+                          (:patch
+                           "patch")
+                          (:commit-range
+                           "commit-range"))
         :worktree-id (artifact-worktree-id artifact) :owner (artifact-owner artifact)
-        :source (artifact-source artifact)
+        :source               (artifact-source artifact)
         :common-git-directory (artifact-common-git-directory artifact)
-        :isolated-path (artifact-isolated-path artifact)
+        :isolated-path        (artifact-isolated-path artifact)
         :baseline (artifact-baseline artifact) :tip (artifact-tip artifact)
-        :patch (artifact-patch artifact)
-        :patch-reference (or patch-reference (artifact-patch-reference artifact))
-        :commits (when (eq (artifact-kind artifact) :commit-range) (artifact-content artifact))
-        :touched-paths (artifact-paths artifact)))
+        :patch                (artifact-patch artifact)
+        :patch-reference      (or patch-reference (artifact-patch-reference artifact))
+        :commits              (when (eq (artifact-kind artifact) :commit-range) (artifact-content artifact))
+        :touched-paths        (artifact-paths artifact)))
 
 (defun %commit-id-p (value)
   "Recognize a full SHA-1 or SHA-256 commit identity."
@@ -367,12 +379,12 @@ PATCH-REFERENCE optionally identifies a separately secured patch; content is ret
         (let ((kind (if (equal "patch" (getf data :kind)) :patch :commit-range)))
           (make-artifact :kind kind :baseline (getf data :baseline) :tip (getf data :tip)
                          :worktree-id (getf data :worktree-id) :owner (getf data :owner)
-                         :source (getf data :source)
+                         :source               (getf data :source)
                          :common-git-directory (getf data :common-git-directory)
-                         :isolated-path (getf data :isolated-path)
+                         :isolated-path        (getf data :isolated-path)
                          :patch (getf data :patch) :patch-reference (getf data :patch-reference)
-                         :paths (getf data :touched-paths)
-                         :content (if (eq kind :patch) (getf data :patch) (getf data :commits)))))
+                         :paths                (getf data :touched-paths)
+                         :content              (if (eq kind :patch) (getf data :patch) (getf data :commits)))))
     (worktree-error (condition) (error condition))
     (error (condition)
       (error 'worktree-error :operation :artifact :detail (princ-to-string condition)))))
@@ -384,8 +396,9 @@ Untracked files are rejected: stage new deliverable files before extraction."
   (let ((path (worktree-path worktree)) (base (worktree-baseline worktree)))
     (unless (zerop (length (%run manager path
                                 '("ls-files" "--others" "--exclude-standard" "-z"))))
-      (error 'dirty-workspace :operation :extract-patch
-             :detail "Stage untracked files before patch extraction"))
+      (error 'dirty-workspace
+             :operation :extract-patch
+             :detail    "Stage untracked files before patch extraction"))
     (when (integration-conflicts manager path)
       (error 'integration-conflict :operation :extract-patch :detail "Unmerged files"
              :paths (integration-conflicts manager path)))
@@ -413,10 +426,10 @@ Untracked files are rejected: stage new deliverable files before extraction."
          (tip (%tip manager worktree)))
     (%artifact manager worktree :kind :commit-range :tip tip
                :content (%commits manager path :base base :tip tip)
-               :patch (%run manager path
-                            (list "diff" "--no-ext-diff" "--no-textconv" "--binary" base tip "--"))
-               :paths (%split-zero (%run manager path
-                                         (list "diff" "--no-renames" "--name-only" "-z" base tip "--"))))))
+               :patch   (%run manager path
+                              (list "diff" "--no-ext-diff" "--no-textconv" "--binary" base tip "--"))
+               :paths   (%split-zero (%run manager path
+                                           (list "diff" "--no-renames" "--name-only" "-z" base tip "--"))))))
 
 (defun integration-conflicts (manager target)
   "Return unmerged target paths."
@@ -429,9 +442,10 @@ Untracked files are rejected: stage new deliverable files before extraction."
                   "rebase-merge" "rebase-apply" "sequencer"))
     (when (probe-file (%trim (%run manager target
                                   (list "rev-parse" "--path-format=absolute" "--git-path" name))))
-      (error 'integration-conflict :operation :busy-target
-             :detail (format nil "Existing Git operation: ~A" name)
-             :paths (integration-conflicts manager target))))
+      (error 'integration-conflict
+             :operation :busy-target
+             :detail    (format nil "Existing Git operation: ~A" name)
+             :paths     (integration-conflicts manager target))))
   t)
 
 (defun check-patch (manager target patch)
@@ -464,8 +478,8 @@ Commits must be present in the target object database. Caller controls integrati
   (%integration-ready manager target)
   (unless (eq (artifact-kind artifact) :commit-range)
     (error 'worktree-error :operation :apply-range :detail "Expected commit-range artifact"))
-  (let* ((base (%revision manager target (artifact-baseline artifact)))
-         (tip (%revision manager target (artifact-tip artifact)))
+  (let* ((base    (%revision manager target (artifact-baseline artifact)))
+         (tip     (%revision manager target (artifact-tip artifact)))
          (commits (%commits manager target :base base :tip tip)))
     (unless (equal commits (artifact-content artifact))
       (error 'worktree-error :operation :apply-range :detail "Commit-range content mismatch"))
