@@ -62,7 +62,7 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
         "-c" "commit.gpgsign=false" "-c" "tag.gpgsign=false"
         "-c" "rerere.enabled=false" "-c" "submodule.recurse=false"))
 
-(defun %invoke (manager directory argv input)
+(defun %invoke (manager directory argv &key input)
   "Validate the runner result and classify execution failures without an exit status."
   (handler-case
       (multiple-value-bind (out err code)
@@ -80,8 +80,7 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
       (%invoke manager directory
                (append (%git-prefix manager)
                        '("config" "--null" "--name-only" "--get-regexp"
-                         "^filter\\..*\\.(clean|smudge|process|required)$"))
-               nil)
+                         "^filter\\..*\\.(clean|smudge|process|required)$")))
     (unless (member code '(0 1))
       (error 'command-failure :operation :configuration :detail err
              :command '("config" "--get-regexp") :exit-code code))
@@ -95,7 +94,7 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
   (multiple-value-bind (out err code)
       (%invoke manager directory
                (append (%git-prefix manager) (%filter-options manager directory) arguments)
-               input)
+               :input input)
     (when (and check (not (zerop code)))
       (error 'command-failure :operation (first arguments) :detail err
              :command arguments :exit-code code))
