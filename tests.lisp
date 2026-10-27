@@ -438,5 +438,5 @@
     (unwind-protect
          (progn
            (write-text collision "revision-name collision")
-           (verify (equal (list tip) (%commits manager source base tip))))
+           (verify (equal (list tip) (%commits manager source :base base :tip tip))))
       (delete-file collision))))

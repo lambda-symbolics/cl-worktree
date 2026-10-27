@@ -396,7 +396,7 @@ Untracked files are rejected: stage new deliverable files before extraction."
                  :paths (%split-zero (%run manager path
                                            (list "diff" "--no-renames" "--name-only" "-z" base "--")))))))
 
-(defun %commits (manager path base tip)
+(defun %commits (manager path &key base tip)
   "Return the validated baseline-to-tip sequence, including an empty NIL range."
   (%run manager path (list "merge-base" "--is-ancestor" base tip))
   (remove "" (uiop:split-string
@@ -412,7 +412,7 @@ Untracked files are rejected: stage new deliverable files before extraction."
   (let* ((path (worktree-path worktree)) (base (worktree-baseline worktree))
          (tip (%tip manager worktree)))
     (%artifact manager worktree :kind :commit-range :tip tip
-               :content (%commits manager path base tip)
+               :content (%commits manager path :base base :tip tip)
                :patch (%run manager path
                             (list "diff" "--no-ext-diff" "--no-textconv" "--binary" base tip "--"))
                :paths (%split-zero (%run manager path
@@ -466,7 +466,7 @@ Commits must be present in the target object database. Caller controls integrati
     (error 'worktree-error :operation :apply-range :detail "Expected commit-range artifact"))
   (let* ((base (%revision manager target (artifact-baseline artifact)))
          (tip (%revision manager target (artifact-tip artifact)))
-         (commits (%commits manager target base tip)))
+         (commits (%commits manager target :base base :tip tip)))
     (unless (equal commits (artifact-content artifact))
       (error 'worktree-error :operation :apply-range :detail "Commit-range content mismatch"))
     (when commits
