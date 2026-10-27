@@ -136,3 +136,17 @@ dirty indexes and untracked files, ownership and orphan recovery, binary patches
 portable secured artifacts, range validation, conflict abort and cleanup failures.
 On Unix they exercise suppression of executable hooks, fsmonitor and external
 filters. Temporary repositories are removed after each run.
+
+## Development
+
+```sh
+./script/bootstrap
+./script/check
+./script/check --fix
+```
+
+`./script/check` runs the tests, then checks the source with
+[cheque](https://github.com/lambda-symbolics/cheque) as `cheque.sexp`
+configures it. `--fix` skips the tests and repairs what cheque can repair.
+cheque and its tools are development dependencies: `checks/qlfile` lists them,
+and the check installs them on first use into `~/.cache/cheque/tools/`.
