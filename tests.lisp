@@ -22,7 +22,7 @@
   (with-open-file (stream path :direction :output :if-exists :supersede)
     (write-string text stream)))
 
-(defun commit-text (manager path text &optional (message "change"))
+(defun commit-text (manager path text &key (message "change"))
   "Commit a fixture edit."
   (write-text (merge-pathnames "file" (uiop:ensure-directory-pathname path)) text)
   (%run manager path '("add" "file"))
@@ -45,7 +45,7 @@
            (%run manager source '("init"))
            (%run manager source '("config" "user.name" "Worktree Tests"))
            (%run manager source '("config" "user.email" "tests@example.invalid"))
-           (commit-text manager source (format nil "base~%") "baseline")
+           (commit-text manager source (format nil "base~%") :message "baseline")
            (let* ((base (%revision manager source "HEAD"))
                   (branch (%trim (%run manager source '("symbolic-ref" "HEAD"))))
                   (tree (create-worktree manager :source source
@@ -273,7 +273,7 @@
       (write-text (merge-pathnames "first" range-path) "first change")
       (%run manager range-path '("add" "first"))
       (%run manager range-path '("commit" "-m" "first"))
-      (commit-text manager range-path "second change" "second")
+      (commit-text manager range-path "second change" :message "second")
       (let* ((artifact (extract-commit-range manager range-tree :owner "range"))
              (data (artifact->plist artifact))
              (restored (plist->artifact data)))
@@ -283,7 +283,7 @@
         (setf (artifact-content restored) (reverse (artifact-content restored)))
         (fails worktree-error (apply-commit-range manager source restored))
         (verify (equal base (%revision manager source "HEAD")))
-        (commit-text manager source "conflicting parent" "conflict")
+        (commit-text manager source "conflicting parent" :message "conflict")
         (let ((before (%revision manager source "HEAD")))
           (fails integration-conflict (apply-commit-range manager source artifact))
           (verify (probe-file (merge-pathnames "first" source)))
