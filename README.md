@@ -41,7 +41,7 @@ filter transformations. Permission and timeout decisions belong to the runner.
 ## Isolation lifecycle
 
 `create-worktree` takes a manager and keyword arguments `source`, `path`,
-`baseline`, `owner`, and `dirty-policy`. Baseline is a commit or commit-resolving
+`baseline`, `owner`, `dirty-policy`, and optional `reserved-function`. Baseline is a commit or commit-resolving
 revision string. Paths are resolved relative to the process working directory.
 The destination must not exist. A detached worktree avoids branch collisions.
 The returned handle supplies `worktree-id`, `worktree-owner`, `worktree-path`,
@@ -51,6 +51,14 @@ Dirty policy defaults to `:reject`. Explicit `:ignore` uses only the chosen
 committed baseline, excluding staged, unstaged, and untracked source edits.
 Creation never checks out, resets, or stashes the source. A non-Git source
 signals `isolation-unavailable`.
+
+Creation publishes a `:creating` registry reservation before invoking Git. Use
+`reserved-function` to record the pending handle in the caller's own durable state.
+If the runner fails or exits nonlocally, retain the checkout and reservation for
+inspection. Call `recover-worktree` with the owner to finish publication after Git
+has created the checkout. Recovery verifies the reservation, Git registration,
+baseline, and any existing ownership marker. `cleanup-worktree` also accepts a
+pending handle, including a reservation cancelled before Git started.
 
 `discover-worktrees` returns two values: owned handles and absent orphan handles,
 optionally filtered by `owner`. With `source`, it also scans private Git markers,

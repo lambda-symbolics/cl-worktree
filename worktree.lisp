@@ -223,45 +223,60 @@ Return :RETIRED only when both the worktree and its Git metadata are absent."
       (t
        (error 'ownership-error :operation :ownership :detail "Unregistered Git metadata")))))
 
-(defun create-worktree (manager &key source path baseline owner (dirty-policy :reject))
-  "Create a new detached worktree at BASELINE. :IGNORE excludes source dirt.
-Existing paths are never reused. SOURCE is never checked out, reset, or stashed."
+(defun create-worktree (manager &key source path baseline owner (dirty-policy :reject)
+                                 reserved-function)
+  "Reserve durable ownership before Git mutation, then create a detached checkout.
+RESERVED-FUNCTION receives the pending handle before Git runs. Interrupted creation
+retains its registry record for explicit RECOVER-WORKTREE or cleanup."
   (check-type owner string)
   (unless (member dirty-policy '(:reject :ignore))
     (error 'worktree-error :operation :create :detail "Unknown dirty-source policy"))
   (let* ((root        (%source manager source))
-         (destination (namestring (merge-pathnames path (uiop:getcwd))))
+         (destination (string-right-trim '(#\/ #\\)
+                                         (namestring (merge-pathnames path (uiop:getcwd)))))
          (revision    (%revision manager root baseline))
          (id          (loop for candidate = (format nil "~36R-~36R" (get-universal-time)
                                                    (random (expt 2 80)))
                             unless (probe-file (%record-path manager candidate)) return candidate)))
-    (when (probe-file destination)
-      (error 'ownership-error :operation :create :detail "Destination already exists"))
+    (when (or (probe-file destination)
+              (find destination (discover-worktrees manager) :key #'worktree-path :test #'equal))
+      (error 'ownership-error :operation :create :detail "Destination already exists or is reserved"))
     (when (eq dirty-policy :reject)
       (restart-case (%clean manager root)
         (use-committed-baseline ()
           :report "Use the committed baseline, excluding all dirty source changes."
           nil)))
-    (%run manager root (list "worktree" "add" "--detach" "--" destination revision))
-    (handler-case
-        (let ((worktree (make-worktree :id id :owner owner :source root
-                                      :path (%source manager destination) :baseline revision
-                                      :git-directory (%git-directory manager destination))))
-          (%write-record (%marker-path worktree) (%data worktree))
-          (%write-record (%record-path manager id) (%data worktree))
-          worktree)
-      (error (condition)
-        ;; Git's non-forced removal refuses any intervening uncommitted work.
-        (handler-case
-            (%run manager root (list "worktree" "remove" "--" destination))
-          (error (cleanup-condition)
-            (error 'cleanup-failure
-                   :operation :creation-rollback
-                   :detail    (format nil "~A; retained ~A: ~A"
-                                      condition destination cleanup-condition))))
-        (if (typep condition 'worktree-error)
-            (error condition)
-            (error 'worktree-error :operation :create :detail (princ-to-string condition)))))))
+    (let ((worktree (make-worktree :id id :owner owner :source root :path destination
+                                   :baseline revision :state :creating)))
+      (%write-record (%record-path manager id) (%data worktree))
+      (when reserved-function (funcall reserved-function worktree))
+      (%run manager root (list "worktree" "add" "--detach" "--" destination revision))
+      (recover-worktree manager worktree :owner owner))))
+
+(defun recover-worktree (manager worktree &key owner)
+  "Complete interrupted creation using its pre-mutation durable reservation.
+Require the same registry record, registered destination and baseline. Never
+replace a foreign marker. A partial checkout remains reserved on failure."
+  (unless (and (eq (worktree-state worktree) :creating)
+               (probe-file (worktree-path worktree)))
+    (return-from recover-worktree worktree))
+  (unless (and (equal owner (worktree-owner worktree))
+               (equal (%data worktree) (%read-record (%record-path manager (worktree-id worktree))))
+               (member (worktree-path worktree)
+                       (%registered-paths manager (worktree-source worktree)) :test #'equal)
+               (equal (worktree-path worktree) (%source manager (worktree-path worktree)))
+               (equal (worktree-baseline worktree) (%revision manager (worktree-path worktree) "HEAD")))
+    (error 'ownership-error :operation :recovery :detail "Creation reservation or checkout mismatch"))
+  (let* ((active    (copy-worktree worktree))
+         (directory (%git-directory manager (worktree-path worktree))))
+    (setf (worktree-git-directory active) directory
+          (worktree-state active) :active)
+    (let ((marker (%marker-path active)))
+      (when (and (probe-file marker) (not (equal (%data active) (%read-record marker))))
+        (error 'ownership-error :operation :recovery :detail "Foreign ownership marker"))
+      (%write-record marker (%data active))
+      (%write-record (%record-path manager (worktree-id active)) (%data active)))
+    active))
 
 (defun discover-worktrees (manager &key owner source)
   "Return two values: owned handles and absent orphan handles.
@@ -294,26 +309,45 @@ Discovery is read-only and never claims unmarked or foreign worktrees."
       (values selected (remove-if (lambda (tree) (probe-file (worktree-path tree))) selected)))))
 
 (defun cleanup-worktree (manager worktree &key owner discard-dirty)
-  "Remove verified owned worktrees, returning T on removal or NIL on RETAIN-WORKTREE.
-Explicit DISCARD-DIRTY permits Git --force. RETRY-CLEANUP revalidates ownership;
-RETAIN-WORKTREE leaves recoverable failures registered without discarding edits."
+  "Remove verified ownership, returning T or NIL on RETAIN-WORKTREE.
+Interrupted creations retain their reservation until recovery or explicit cleanup.
+DISCARD-DIRTY permits forced removal; RETRY-CLEANUP revalidates ownership."
   (restart-case
-      (let ((status (%owned manager worktree owner :absent-ok t)))
-        (handler-case
-            (progn
-              (unless (eq status :retired)
-                (when (probe-file (worktree-path worktree))
-                  (unless discard-dirty (%clean manager (worktree-path worktree))))
-                (%run manager (worktree-source worktree)
-                      (append '("worktree" "remove") (when discard-dirty '("--force"))
-                              (list "--" (worktree-path worktree)))))
-              (let ((record (%record-path manager (worktree-id worktree))))
-                (when (probe-file record) (delete-file record)))
-              (setf (worktree-state worktree) :removed)
-              t)
-          (dirty-workspace (condition) (error condition))
-          (error (condition)
-            (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition)))))
+      (progn
+        (when (eq (worktree-state worktree) :creating)
+          (unless (and (equal owner (worktree-owner worktree))
+                       (equal (%data worktree)
+                              (%read-record (%record-path manager (worktree-id worktree)))))
+            (error 'ownership-error :operation :cleanup :detail "Creation reservation mismatch"))
+          (unless (probe-file (worktree-path worktree))
+            (when (member (worktree-path worktree)
+                          (%registered-paths manager (worktree-source worktree)) :test #'equal)
+              (handler-case
+                  (%run manager (worktree-source worktree)
+                        (append '("worktree" "remove") (when discard-dirty '("--force"))
+                                (list "--" (worktree-path worktree))))
+                (error (condition)
+                  (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition)))))
+            (delete-file (%record-path manager (worktree-id worktree)))
+            (setf (worktree-state worktree) :removed)
+            (return-from cleanup-worktree t))
+          (setf worktree (recover-worktree manager worktree :owner owner)))
+        (let ((status (%owned manager worktree owner :absent-ok t)))
+          (handler-case
+              (progn
+                (unless (eq status :retired)
+                  (when (probe-file (worktree-path worktree))
+                    (unless discard-dirty (%clean manager (worktree-path worktree))))
+                  (%run manager (worktree-source worktree)
+                        (append '("worktree" "remove") (when discard-dirty '("--force"))
+                                (list "--" (worktree-path worktree)))))
+                (let ((record (%record-path manager (worktree-id worktree))))
+                  (when (probe-file record) (delete-file record)))
+                (setf (worktree-state worktree) :removed)
+                t)
+            (dirty-workspace (condition) (error condition))
+            (error (condition)
+              (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition))))))
     (retain-worktree ()
       :report "Retain the owned worktree and its registry without discarding edits."
       nil)

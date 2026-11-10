@@ -127,6 +127,7 @@
            (run-provenance-tests manager root source)
            (run-rollback-tests manager root source)
            (run-restart-tests manager root source)
+           (run-creation-reservation-tests manager root source)
            (run-revision-disambiguation-tests manager source)
            (format t "~D cl-worktree checks passed.~%" *checks*)
            t)
@@ -360,19 +361,19 @@
                                                                             (uiop:ensure-directory-pathname destination))
                                                              "must survive")))
                                              (values out err code)))))))
-        (if dirty
-            (progn
-              (fails cleanup-failure
-                (create-worktree injected :source source :path destination :baseline base :owner "rollback"))
-              (verify (equal "must survive"
-                             (uiop:read-file-string
-                              (merge-pathnames "valuable" (uiop:ensure-directory-pathname destination)))))
-              ;; The fixture owner explicitly disposes of the retained partial creation.
-              (%run manager source (list "worktree" "remove" "--force" "--" destination)))
-            (progn
-              (fails isolation-unavailable
-                (create-worktree injected :source source :path destination :baseline base :owner "rollback"))
-              (verify (not (probe-file destination)))))))
+        (fails isolation-unavailable
+          (create-worktree injected :source source :path destination :baseline base :owner "rollback"))
+        (verify (probe-file destination))
+        (let* ((pending   (first (discover-worktrees manager :owner "rollback")))
+               (recovered (recover-worktree manager pending :owner "rollback")))
+          (verify (eq :creating (worktree-state pending)))
+          (verify (eq :active (worktree-state recovered)))
+          (when dirty
+            (verify (equal "must survive"
+                           (uiop:read-file-string
+                            (merge-pathnames "valuable" (uiop:ensure-directory-pathname destination)))))
+            (fails dirty-workspace (cleanup-worktree manager recovered :owner "rollback")))
+          (verify (cleanup-worktree manager recovered :owner "rollback" :discard-dirty t)))))
     (let* ((tree (create-worktree manager :source source :path (merge-pathnames "rename" root)
                                   :baseline base :owner "rename"))
            (path (uiop:ensure-directory-pathname (worktree-path tree))))
@@ -430,6 +431,38 @@
         (verify (null (discover-worktrees manager)))))
     (verify (equal base (%revision manager source "HEAD")))
     (%clean manager source)))
+
+(defun run-creation-reservation-tests (manager root source)
+  "Retain reservations across nonlocal exits on either side of Git mutation."
+  (dolist (after-add-p '(nil t))
+    (let* ((path     (merge-pathnames (if after-add-p "after-add" "before-add") root))
+           (reserved nil)
+           (interrupted
+             (make-manager
+              :registry (manager-registry manager)
+              :runner   (lambda (argv &key directory input)
+                          (if (and after-add-p
+                                   (equal "add" (second (member "worktree" argv :test #'equal))))
+                              (progn
+                                (test-runner argv :directory directory :input input)
+                                (throw 'interrupted :cancelled))
+                              (test-runner argv :directory directory :input input))))))
+      (verify (eq :cancelled
+                  (catch 'interrupted
+                    (create-worktree interrupted :source source :path path :baseline "HEAD" :owner "reserved"
+                                     :reserved-function
+                                     (lambda (handle)
+                                       (setf reserved handle)
+                                       (verify (equal (%data handle)
+                                                      (%read-record (%record-path manager (worktree-id handle)))))
+                                       (unless after-add-p (throw 'interrupted :cancelled)))))))
+      (verify (eq :creating (worktree-state reserved)))
+      (verify (= 1 (length (discover-worktrees manager :owner "reserved"))))
+      (fails ownership-error (cleanup-worktree manager reserved :owner "foreign"))
+      (fails ownership-error
+        (create-worktree manager :source source :path path :baseline "HEAD" :owner "replacement"))
+      (verify (cleanup-worktree manager reserved :owner "reserved"))
+      (verify (null (discover-worktrees manager :owner "reserved"))))))
 
 (defun run-revision-disambiguation-tests (manager source)
   "Enumerate the requested commits even when a file has the range's spelling."
