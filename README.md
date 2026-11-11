@@ -54,11 +54,19 @@ signals `isolation-unavailable`.
 
 Creation publishes a `:creating` registry reservation before invoking Git. Use
 `reserved-function` to record the pending handle in the caller's own durable state.
-If the runner fails or exits nonlocally, retain the checkout and reservation for
-inspection. Call `recover-worktree` with the owner to finish publication after Git
-has created the checkout. Recovery verifies the reservation, Git registration,
-baseline, and any existing ownership marker. `cleanup-worktree` also accepts a
-pending handle, including a reservation cancelled before Git started.
+Creation revalidates the reservation after this callback; cancelling the handle
+there prevents Git creation. Git creates the checkout with `worktree add --lock
+--reason` containing the invocation ID. If the runner fails or exits nonlocally,
+retain the checkout and reservation for inspection. Call `recover-worktree` with
+the owner to finish publication after Git has created the checkout. Recovery
+verifies the reservation, Git registration, baseline, creation lock, and any
+existing ownership marker before publishing ownership and releasing the lock.
+`cleanup-worktree` also accepts a pending handle, including a reservation cancelled
+before Git started or an absent checkout with its own locked Git metadata.
+Unmarked or foreign metadata without this invocation's creation proof raises
+`ownership-error` and retains the reservation. A pathname and baseline alone do
+not prove ownership. Discover the published handle if interruption occurred after
+ownership publication but before releasing the creation lock.
 
 `discover-worktrees` returns two values: owned handles and absent orphan handles,
 optionally filtered by `owner`. With `source`, it also scans private Git markers,

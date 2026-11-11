@@ -223,6 +223,66 @@ Return :RETIRED only when both the worktree and its Git metadata are absent."
       (t
        (error 'ownership-error :operation :ownership :detail "Unregistered Git metadata")))))
 
+(defun %creation-reason (worktree)
+  "Identify this invocation in Git's atomic creation lock."
+  (format nil "cl-worktree ~A" (worktree-id worktree)))
+
+(defun %creation-reservation (manager worktree owner)
+  "Require an unchanged pending handle and its durable reservation."
+  (unless (and (eq (worktree-state worktree) :creating)
+               (equal owner (worktree-owner worktree))
+               (equal (%data worktree)
+                      (%read-record (%record-path manager (worktree-id worktree)))))
+    (error 'ownership-error :operation :creation :detail "Creation reservation mismatch")))
+
+(defun %creation-directory (manager worktree)
+  "Find private Git metadata by its backlink, including absent checkouts."
+  (let* ((common   (%trim (%run manager (worktree-source worktree)
+                               '("rev-parse" "--path-format=absolute" "--git-common-dir"))))
+         (backlink (namestring (merge-pathnames ".git"
+                                               (uiop:ensure-directory-pathname
+                                                (worktree-path worktree)))))
+         (matches
+           (loop for directory in (uiop:subdirectories
+                                   (merge-pathnames "worktrees/"
+                                                    (uiop:ensure-directory-pathname common)))
+                 for file = (merge-pathnames "gitdir" directory)
+                 when (and (probe-file file)
+                           (equal backlink (%trim (uiop:read-file-string file))))
+                   collect (string-right-trim '(#\/ #\\) (namestring directory)))))
+    (when (rest matches)
+      (error 'ownership-error :operation :creation :detail "Ambiguous Git metadata"))
+    (first matches)))
+
+(defun %creation-proof (worktree directory)
+  "Require Git's invocation-specific lock before adopting pending metadata."
+  (let ((lock (merge-pathnames "locked" (uiop:ensure-directory-pathname directory))))
+    (unless (and (probe-file lock)
+                 (equal (%creation-reason worktree) (%trim (uiop:read-file-string lock))))
+      (error 'ownership-error :operation :creation :detail "Missing or foreign creation proof"))))
+
+(defun %unlock-creation (manager worktree)
+  "Release only this invocation's creation lock after ownership publication."
+  (let ((lock (merge-pathnames "locked"
+                              (uiop:ensure-directory-pathname (worktree-git-directory worktree)))))
+    (when (probe-file lock)
+      (%creation-proof worktree (worktree-git-directory worktree))
+      (%run manager (worktree-source worktree)
+            (list "worktree" "unlock" "--" (worktree-path worktree))))))
+
+(defun %publish-creation (manager worktree directory)
+  "Publish proven creation ownership before releasing Git's creation lock."
+  (%creation-proof worktree directory)
+  (let ((active (copy-worktree worktree)))
+    (setf (worktree-git-directory active) directory
+          (worktree-state active) :active)
+    (let ((marker (%marker-path active)))
+      (when (and (probe-file marker) (not (equal (%data active) (%read-record marker))))
+        (error 'ownership-error :operation :recovery :detail "Foreign ownership marker"))
+      (%write-record marker (%data active))
+      (%write-record (%record-path manager (worktree-id active)) (%data active)))
+    active))
+
 (defun create-worktree (manager &key source path baseline owner (dirty-policy :reject)
                                  reserved-function)
   "Reserve durable ownership before Git mutation, then create a detached checkout.
@@ -250,33 +310,30 @@ retains its registry record for explicit RECOVER-WORKTREE or cleanup."
                                    :baseline revision :state :creating)))
       (%write-record (%record-path manager id) (%data worktree))
       (when reserved-function (funcall reserved-function worktree))
-      (%run manager root (list "worktree" "add" "--detach" "--" destination revision))
+      (%creation-reservation manager worktree owner)
+      (%run manager root (list "worktree" "add" "--detach" "--lock" "--reason"
+                               (%creation-reason worktree) "--" destination revision))
       (recover-worktree manager worktree :owner owner))))
 
 (defun recover-worktree (manager worktree &key owner)
-  "Complete interrupted creation using its pre-mutation durable reservation.
-Require the same registry record, registered destination and baseline. Never
-replace a foreign marker. A partial checkout remains reserved on failure."
+  "Complete interrupted creation with the reservation and Git's creation lock.
+Require invocation-specific proof before publishing ownership. Ambiguous or foreign
+metadata remains reserved for inspection; recovery never claims an unmarked checkout."
   (unless (and (eq (worktree-state worktree) :creating)
                (probe-file (worktree-path worktree)))
     (return-from recover-worktree worktree))
-  (unless (and (equal owner (worktree-owner worktree))
-               (equal (%data worktree) (%read-record (%record-path manager (worktree-id worktree))))
-               (member (worktree-path worktree)
+  (%creation-reservation manager worktree owner)
+  (unless (and (member (worktree-path worktree)
                        (%registered-paths manager (worktree-source worktree)) :test #'equal)
                (equal (worktree-path worktree) (%source manager (worktree-path worktree)))
                (equal (worktree-baseline worktree) (%revision manager (worktree-path worktree) "HEAD")))
     (error 'ownership-error :operation :recovery :detail "Creation reservation or checkout mismatch"))
-  (let* ((active    (copy-worktree worktree))
-         (directory (%git-directory manager (worktree-path worktree))))
-    (setf (worktree-git-directory active) directory
-          (worktree-state active) :active)
-    (let ((marker (%marker-path active)))
-      (when (and (probe-file marker) (not (equal (%data active) (%read-record marker))))
-        (error 'ownership-error :operation :recovery :detail "Foreign ownership marker"))
-      (%write-record marker (%data active))
-      (%write-record (%record-path manager (worktree-id active)) (%data active)))
-    active))
+  (let ((directory (%git-directory manager (worktree-path worktree))))
+    (unless (equal directory (%creation-directory manager worktree))
+      (error 'ownership-error :operation :recovery :detail "Foreign Git directory"))
+    (let ((active (%publish-creation manager worktree directory)))
+      (%unlock-creation manager active)
+      active)))
 
 (defun discover-worktrees (manager &key owner source)
   "Return two values: owned handles and absent orphan handles.
@@ -315,19 +372,20 @@ DISCARD-DIRTY permits forced removal; RETRY-CLEANUP revalidates ownership."
   (restart-case
       (progn
         (when (eq (worktree-state worktree) :creating)
-          (unless (and (equal owner (worktree-owner worktree))
-                       (equal (%data worktree)
-                              (%read-record (%record-path manager (worktree-id worktree)))))
-            (error 'ownership-error :operation :cleanup :detail "Creation reservation mismatch"))
+          (%creation-reservation manager worktree owner)
           (unless (probe-file (worktree-path worktree))
-            (when (member (worktree-path worktree)
-                          (%registered-paths manager (worktree-source worktree)) :test #'equal)
-              (handler-case
-                  (%run manager (worktree-source worktree)
-                        (append '("worktree" "remove") (when discard-dirty '("--force"))
-                                (list "--" (worktree-path worktree))))
-                (error (condition)
-                  (error 'cleanup-failure :operation :cleanup :detail (princ-to-string condition)))))
+            (let ((directory  (%creation-directory manager worktree))
+                  (registered (member (worktree-path worktree)
+                                      (%registered-paths manager (worktree-source worktree))
+                                      :test #'equal)))
+              (when (or directory registered)
+                (unless (and directory registered)
+                  (error 'ownership-error :operation :cleanup :detail "Unmatched pending Git metadata"))
+                (let* ((active  (%publish-creation manager worktree directory))
+                       (removed (cleanup-worktree manager active :owner       owner
+                                                               :discard-dirty discard-dirty)))
+                  (when removed (setf (worktree-state worktree) :removed))
+                  (return-from cleanup-worktree removed))))
             (delete-file (%record-path manager (worktree-id worktree)))
             (setf (worktree-state worktree) :removed)
             (return-from cleanup-worktree t))
@@ -338,6 +396,7 @@ DISCARD-DIRTY permits forced removal; RETRY-CLEANUP revalidates ownership."
                 (unless (eq status :retired)
                   (when (probe-file (worktree-path worktree))
                     (unless discard-dirty (%clean manager (worktree-path worktree))))
+                  (%unlock-creation manager worktree)
                   (%run manager (worktree-source worktree)
                         (append '("worktree" "remove") (when discard-dirty '("--force"))
                                 (list "--" (worktree-path worktree)))))

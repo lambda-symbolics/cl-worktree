@@ -89,7 +89,8 @@
                (let ((range (extract-commit-range manager tree :owner "task")))
                  (verify (= 1 (length (artifact-content range))))
                  (verify (apply-commit-range manager source range))
-                 (verify (equal (artifact-tip range) (%revision manager source "HEAD")))
+                 (verify (equal (%trim (%run manager source '("rev-parse" "HEAD^{tree}")))
+                                (%trim (%run manager path '("rev-parse" "HEAD^{tree}")))))
                  (%run manager source (list "reset" "--hard" base))
                  (commit-text manager source (format nil "parent~%"))
                  (let ((parent-tip (%revision manager source "HEAD")))
@@ -328,9 +329,90 @@
     (verify (equal base (%revision manager source "HEAD")))
     (%clean manager source)))
 
+(defun run-creation-ownership-case (manager root source &key scenario)
+  "Exercise creation proof against callback cancellation and foreign metadata."
+  (let* ((destination (namestring (merge-pathnames (symbol-name scenario) root)))
+         (pending     nil)
+         (injected
+           (make-manager
+            :registry (manager-registry manager)
+            :runner   (lambda (argv &key directory input)
+                        (if (equal "add" (second (member "worktree" argv :test #'equal)))
+                            (progn
+                              (when (member scenario '(:own-interrupted :own-absent :own-foreign-marker))
+                                (test-runner argv :directory directory :input input))
+                              (error "Interrupted creation"))
+                            (test-runner argv :directory directory :input input))))))
+    (if (eq scenario :callback-cancel)
+        (progn
+          (fails ownership-error
+            (create-worktree manager :source source :path destination :baseline "HEAD" :owner "proof"
+                             :reserved-function
+                             (lambda (tree)
+                               (setf pending tree)
+                               (cleanup-worktree manager tree :owner "proof"))))
+          (verify (eq :removed (worktree-state pending)))
+          (verify (not (probe-file destination)))
+          (verify (not (member destination (%registered-paths manager source) :test #'equal))))
+        (progn
+          (fails worktree-error
+            (create-worktree injected :source source :path destination :baseline "HEAD" :owner "proof"
+                             :reserved-function (lambda (tree) (setf pending tree))))
+          (if (member scenario '(:own-interrupted :own-absent :own-foreign-marker))
+              (if (eq scenario :own-interrupted)
+                  (let ((active (recover-worktree manager pending :owner "proof")))
+                    (verify (eq :active (worktree-state active)))
+                    (verify (not (probe-file
+                                  (merge-pathnames "locked"
+                                                   (uiop:ensure-directory-pathname
+                                                    (worktree-git-directory active))))))
+                    (verify (cleanup-worktree manager active :owner "proof")))
+                  (let* ((directory (%git-directory manager destination))
+                         (marker    (merge-pathnames "cl-worktree-owner.sexp"
+                                                     (uiop:ensure-directory-pathname directory))))
+                    (uiop:delete-directory-tree (uiop:ensure-directory-pathname destination) :validate t)
+                    (when (eq scenario :own-foreign-marker)
+                      (%write-record marker '(:owner "foreign"))
+                      (fails ownership-error
+                        (cleanup-worktree manager pending :owner "proof" :discard-dirty t))
+                      (verify (probe-file directory))
+                      (verify (probe-file (%record-path manager (worktree-id pending))))
+                      (delete-file marker))
+                    (verify (cleanup-worktree manager pending :owner "proof" :discard-dirty t))
+                    (verify (not (probe-file directory)))))
+              (progn
+                (%run manager source (list "worktree" "add" "--detach" "--" destination "HEAD"))
+                (let ((directory (%git-directory manager destination)))
+                  (write-text (merge-pathnames "valuable" (uiop:ensure-directory-pathname destination))
+                              "foreign edits")
+                  (when (eq scenario :foreign-absent)
+                    (%write-record (merge-pathnames "cl-worktree-owner.sexp"
+                                                   (uiop:ensure-directory-pathname directory))
+                                   '(:owner "foreign"))
+                    (uiop:delete-directory-tree (uiop:ensure-directory-pathname destination) :validate t))
+                  (if (eq scenario :foreign-absent)
+                      (fails ownership-error
+                        (cleanup-worktree manager pending :owner "proof" :discard-dirty t))
+                      (progn
+                        (fails ownership-error (recover-worktree manager pending :owner "proof"))
+                        (fails ownership-error
+                          (cleanup-worktree manager pending :owner "proof" :discard-dirty t))
+                        (verify (equal "foreign edits"
+                                       (uiop:read-file-string
+                                        (merge-pathnames "valuable"
+                                                         (uiop:ensure-directory-pathname destination)))))))
+                  (verify (probe-file directory))
+                  (verify (probe-file (%record-path manager (worktree-id pending))))
+                  (verify (eq :creating (worktree-state pending)))
+                  (%run manager source (list "worktree" "remove" "--force" "--" destination))
+                  (cleanup-worktree manager pending :owner "proof"))))))))
+
 (defun run-rollback-tests (manager root source)
   "Exercise interrupted creation without discarding intervening work, and renames."
   (let ((base (%revision manager source "HEAD")))
+    (dolist (scenario '(:callback-cancel :foreign-unmarked :foreign-absent
+                        :own-interrupted :own-absent :own-foreign-marker))
+      (run-creation-ownership-case manager root source :scenario scenario))
     (fails isolation-unavailable
       (create-worktree manager :source (merge-pathnames "missing-source/" root)
                        :path (merge-pathnames "unavailable" root) :baseline base :owner "missing"))
