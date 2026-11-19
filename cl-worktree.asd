@@ -1,5 +1,5 @@
 (asdf:defsystem "cl-worktree"
-  :description "Owned Git worktree isolation and integration primitives"
+  :description "Library for Git worktree isolation and integration primitives"
   :author      "Lambda Symbolics"
   :license     "ISC"
   :version     "0.1.0"
