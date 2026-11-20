@@ -3,6 +3,7 @@
   (:documentation "A library for managing owned, detached Git worktrees, with the ability to extract the patches and commit ranges from them.")
   (:export #:make-manager #:manager #:worktree #:worktree-path #:worktree-source
            #:worktree-id #:worktree-owner #:worktree-baseline #:worktree-state
+           #:describe-repository #:repository-primary-checkout #:repository-origin
            #:create-worktree #:recover-worktree #:discover-worktrees #:cleanup-worktree
            #:use-committed-baseline #:retain-worktree #:retry-cleanup
            #:artifact #:artifact-kind #:artifact-baseline #:artifact-tip

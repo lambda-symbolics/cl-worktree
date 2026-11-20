@@ -184,11 +184,79 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
     (error (condition)
       (error 'ownership-error :operation :metadata :detail (princ-to-string condition)))))
 
+(defun %repository-directory (path)
+  "Canonicalize an existing absolute native directory, or return NIL."
+  (handler-case
+      (let ((directory (uiop:ensure-directory-pathname
+                        (if (pathnamep path) path (uiop:parse-native-namestring path)))))
+        (when (uiop:absolute-pathname-p directory)
+          (let ((existing (uiop:directory-exists-p directory)))
+            (when existing (uiop:native-namestring (truename existing))))))
+    (file-error () nil)))
+
+(defun %repository-path (directory arguments git-output canonicalize)
+  "Read a Git path, removing only the protocol's final newline."
+  (let ((output (funcall git-output directory arguments)))
+    (when (and output (> (length output) 1)
+               (char= (char output (1- (length output))) #\Newline))
+      (funcall canonicalize (subseq output 0 (1- (length output)))))))
+
+(defun describe-repository (directory git-output &key (canonicalize #'%repository-directory))
+  "Return DIRECTORY's local Git identity as (:COMMON ... :PRIVATE ... :ROOT ...), or NIL.
+GIT-OUTPUT takes a directory and fixed Git subcommand arguments and returns
+successful stdout or NIL; the caller controls the process policy. CANONICALIZE
+returns a canonical name only for existing absolute directories. A checkout's
+private directory can differ from its common directory, and a bare repository
+has no checkout root. No registry or Git state is written."
+  (when (funcall canonicalize directory)
+    (let ((common (%repository-path directory '("rev-parse" "--path-format=absolute" "--git-common-dir")
+                                    git-output canonicalize)))
+      (when common
+        (list :common  common
+              :private (%repository-path directory '("rev-parse" "--absolute-git-dir") git-output canonicalize)
+              :root    (%repository-path directory '("rev-parse" "--show-toplevel") git-output canonicalize))))))
+
+(defun repository-primary-checkout (description)
+  "Return the observed primary checkout root in DESCRIPTION, if any."
+  (let ((common (getf description :common)))
+    (when (and common (equal common (getf description :private)))
+      (getf description :root))))
+
+(defun %worktree-field-path (field)
+  "Return the literal path from a porcelain worktree field, if present."
+  (when (and field (uiop:string-prefix-p "worktree " field))
+    (subseq field 9)))
+
+(defun repository-origin (directory description git-output
+                          &key (canonicalize #'%repository-directory) describe)
+  "Return the verified primary path for DESCRIPTION, or NIL.
+DESCRIBE may supply cached descriptions of other directories; by default query
+with GIT-OUTPUT and CANONICALIZE. The first worktree record is only a candidate:
+verify its administrative identity and checkout root, or its bare identity."
+  (or (repository-primary-checkout description)
+      (let ((common (getf description :common)))
+        (when common
+          (let* ((output (funcall git-output directory '("worktree" "list" "--porcelain" "-z")))
+                 (end    (and output (search '(#\Null #\Null) output)))
+                 (fields (and end (uiop:split-string (subseq output 0 end) :separator '(#\Null))))
+                 (path   (%worktree-field-path (first fields)))
+                 (path   (and path (funcall canonicalize path))))
+            (when path
+              (if (member "bare" fields :test #'string=)
+                  (and (equal path common) path)
+                  (let ((candidate (if describe
+                                       (funcall describe path)
+                                       (describe-repository path git-output :canonicalize canonicalize))))
+                    (when (and (equal common (getf candidate :common))
+                               (equal path (repository-primary-checkout candidate)))
+                      path)))))))))
+
 (defun %registered-paths (manager source)
   "Read registered paths using Git's NUL-delimited porcelain format."
   (loop for field in (%split-zero
                       (%run manager source '("worktree" "list" "--porcelain" "-z")))
-        when (uiop:string-prefix-p "worktree " field) collect (subseq field 9)))
+        for path = (%worktree-field-path field)
+        when path collect path))
 
 (defun %owned (manager worktree owner &key absent-ok)
   "Verify registry, owner, registered path and private Git marker before mutation.
