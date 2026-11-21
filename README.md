@@ -38,6 +38,13 @@ and textconv. These overrides do not edit global or repository configuration.
 Worktree checkout and comparison use raw repository contents rather than external
 filter transformations. Permission and timeout decisions belong to the runner.
 
+Use `git-read-argv` for fixed, read-only Git metadata queries without creating a
+manager or registry. Use `checkout-admin-roots` for filesystem-only discovery of
+one exact checkout's private and shared Git directories. It returns canonical
+pathnames, returns NIL when the checkout has no `.git` entry, and signals
+`ownership-error` for malformed or incomplete metadata. It does not search
+parents. The caller decides whether to grant access to the returned roots.
+
 ## Isolation lifecycle
 
 `create-worktree` takes a manager and keyword arguments `source`, `path`,
@@ -74,6 +81,12 @@ recovering handles if registry publication was interrupted. Discovery is read-on
 and excludes unmarked worktrees. Registry records survive failed cleanup and
 process restart. Externally pruned orphans can retire their own registry record
 without pruning or removing unrelated metadata.
+
+If the caller saved the handle's identity instead of the handle itself, call
+`recover-worktree-by-identity` with its exact `owner`, `source`, `id`, `baseline`,
+and `path` strings. A missing or ambiguous match signals
+`worktree-identity-mismatch` before recovery can publish ownership or unlock Git
+metadata.
 
 `cleanup-worktree` requires the owner and verifies the private registry and Git
 directory identity marker. Dirty worktrees raise `dirty-workspace`; explicit

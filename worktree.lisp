@@ -26,6 +26,9 @@
 (define-condition ownership-error (worktree-error) ()
   (:documentation "Identity or repository ownership could not be verified."))
 
+(define-condition worktree-identity-mismatch (ownership-error) ()
+  (:documentation "The expected durable identity did not select a unique owned handle."))
+
 (define-condition cleanup-failure (worktree-error) ()
   (:documentation "Cleanup failed; retained metadata allows inspection and retry."))
 
@@ -58,16 +61,22 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
     (ensure-directories-exist (merge-pathnames "disabled-hooks/probe" path))
     (%make-manager :runner runner :registry path)))
 
+(defun %git-base-argv (&optional (hooks-path ""))
+  "Build the common Git prefix without consulting any registry or process state."
+  (list "git" "--no-pager" "--no-optional-locks"
+        "-c" (concatenate 'string "core.hooksPath=" hooks-path)
+        "-c" "core.fsmonitor=false" "-c" "gc.auto=0" "-c" "maintenance.auto=false"))
+
+(defun git-read-argv (arguments)
+  "Build argv for a caller-selected read-only Git metadata query without a manager."
+  (append (%git-base-argv) arguments))
+
 (defun %git-prefix (manager)
   "Disable externally executable Git features and automatic background mutation."
-  (list "git" "--no-pager" "--no-optional-locks"
-        "-c" (format nil "core.hooksPath=~A"
-                     (namestring (merge-pathnames "disabled-hooks/"
-                                                  (manager-registry manager))))
-        "-c" "core.fsmonitor=false" "-c" "gc.auto=0"
-        "-c" "maintenance.auto=false" "-c" "core.sparseCheckout=false"
-        "-c" "commit.gpgsign=false" "-c" "tag.gpgsign=false"
-        "-c" "rerere.enabled=false" "-c" "submodule.recurse=false"))
+  (append (%git-base-argv (namestring (merge-pathnames "disabled-hooks/"
+                                                      (manager-registry manager))))
+          '("-c" "core.sparseCheckout=false" "-c" "commit.gpgsign=false"
+            "-c" "tag.gpgsign=false" "-c" "rerere.enabled=false" "-c" "submodule.recurse=false")))
 
 (defun %invoke (manager directory argv &key input)
   "Validate the runner result and classify execution failures without an exit status."
@@ -194,7 +203,92 @@ REGISTRY must be a private directory. Callers serialize operations per repositor
             (when existing (uiop:native-namestring (truename existing))))))
     (file-error () nil)))
 
-(defun %repository-path (directory arguments git-output canonicalize)
+(defun %admin-path-kind (path)
+  "Recognize directory and file paths with the default filesystem adapter."
+  (cond ((uiop:directory-exists-p (uiop:ensure-directory-pathname path))
+         :directory)
+        ((uiop:file-exists-p path)
+         :file)))
+
+(defun %admin-error (detail)
+  "Report incomplete or malformed exact-checkout metadata."
+  (error 'ownership-error :operation :checkout-admin-roots :detail detail))
+
+(defun %admin-pointer (file directory &key (prefix ""))
+  "Read one nonempty native path from a bounded Git pointer file."
+  (with-open-file (stream file)
+    (let* ((raw  (with-output-to-string (text)
+                   (loop for character = (read-char stream nil nil)
+                         repeat 65536
+                         while (and character (char/= character #\Newline))
+                         do (write-char character text)
+                         finally (when (and character (char/= character #\Newline))
+                                   (%admin-error "Git administrative pointer is too long")))))
+           (line (if (uiop:string-suffix-p (string #\Return) raw)
+                     (subseq raw 0 (1- (length raw)))
+                     raw)))
+      (unless (and (uiop:string-prefix-p prefix line) (> (length line) (length prefix))
+                   (not (find #\Null line)) (not (find #\Return line))
+                   (not (read-char stream nil nil)))
+        (%admin-error "Malformed Git administrative pointer"))
+      (merge-pathnames (uiop:parse-native-namestring (subseq line (length prefix))) directory))))
+
+(defun %admin-canonical-path (path kind &key path-kind canonicalize)
+  "Require an existing canonical native pathname of KIND."
+  (let* ((path   (if (eq kind :directory) (uiop:ensure-directory-pathname path) path))
+         (result (and (eq kind (funcall path-kind path)) (funcall canonicalize path))))
+    (unless (and (pathnamep result) (uiop:absolute-pathname-p result)
+                 (not (typep result 'logical-pathname)) (not (wild-pathname-p result))
+                 (not (intersection (pathname-directory result) '(:up :back)))
+                 (eq (not (null (uiop:directory-pathname-p result))) (eq kind :directory))
+                 (eq kind (funcall path-kind result)))
+      (%admin-error "Git administrative path is missing or not canonical"))
+    result))
+
+(defun checkout-admin-roots (checkout &key (path-kind #'%admin-path-kind) (canonicalize #'truename))
+  "Return CHECKOUT's canonical private/common Git directories as distinct pathnames.
+Inspect only its .git entry without a subprocess. Return NIL when that entry
+is absent; signal OWNERSHIP-ERROR for invalid or incomplete metadata. PATH-KIND
+returns :DIRECTORY, :FILE, NIL for absence, or another value for unsupported kinds.
+CANONICALIZE returns an existing absolute native pathname, including for files."
+  (handler-case
+      (flet ((canonical (path kind)
+               (%admin-canonical-path path kind :path-kind path-kind :canonicalize canonicalize)))
+        (let* ((directory (canonical (pathname checkout) :directory))
+               (entry     (merge-pathnames ".git" directory))
+               (kind      (funcall path-kind entry)))
+          (when kind
+            (let* ((private (canonical
+                             (case kind
+                               (:directory
+                                entry)
+                               (:file
+                                (%admin-pointer entry directory :prefix "gitdir: "))
+                               (otherwise
+                                (%admin-error "Invalid .git entry kind")))
+                             :directory))
+                   (pointer (merge-pathnames "commondir" private))
+                   (common  (case (funcall path-kind pointer)
+                              ((nil)
+                               private)
+                              (:file
+                               (let ((backlink (merge-pathnames "gitdir" private)))
+                                 (unless (and (eq kind :file) (eq (funcall path-kind backlink) :file)
+                                              (equal (canonical (%admin-pointer backlink private) :file)
+                                                     (canonical entry :file)))
+                                   (%admin-error "Linked Git directory does not identify this checkout")))
+                               (canonical (%admin-pointer pointer private) :directory))
+                              (otherwise
+                               (%admin-error "Invalid commondir entry kind")))))
+              (unless (and (eq :file (funcall path-kind (merge-pathnames "HEAD" private)))
+                           (eq :directory (funcall path-kind (merge-pathnames "objects/" common)))
+                           (eq :directory (funcall path-kind (merge-pathnames "refs/" common))))
+                (%admin-error "Incomplete Git administrative directories"))
+              (if (equal private common) (list private) (list private common))))))
+    (ownership-error (condition) (error condition))
+    (error (condition) (%admin-error (princ-to-string condition)))))
+
+(defun %repository-path (directory arguments git-output &key canonicalize)
   "Read a Git path, removing only the protocol's final newline."
   (let ((output (funcall git-output directory arguments)))
     (when (and output (> (length output) 1)
@@ -210,11 +304,11 @@ private directory can differ from its common directory, and a bare repository
 has no checkout root. No registry or Git state is written."
   (when (funcall canonicalize directory)
     (let ((common (%repository-path directory '("rev-parse" "--path-format=absolute" "--git-common-dir")
-                                    git-output canonicalize)))
+                                    git-output :canonicalize canonicalize)))
       (when common
         (list :common  common
-              :private (%repository-path directory '("rev-parse" "--absolute-git-dir") git-output canonicalize)
-              :root    (%repository-path directory '("rev-parse" "--show-toplevel") git-output canonicalize))))))
+              :private (%repository-path directory '("rev-parse" "--absolute-git-dir") git-output :canonicalize canonicalize)
+              :root    (%repository-path directory '("rev-parse" "--show-toplevel") git-output :canonicalize canonicalize))))))
 
 (defun repository-primary-checkout (description)
   "Return the observed primary checkout root in DESCRIPTION, if any."
@@ -432,6 +526,24 @@ Discovery is read-only and never claims unmarked or foreign worktrees."
                      (lambda (tree) (or (null owner) (equal owner (worktree-owner tree))))
                      trees)))
       (values selected (remove-if (lambda (tree) (probe-file (worktree-path tree))) selected)))))
+
+(defun recover-worktree-by-identity (manager &key owner source id baseline path)
+  "Recover only a discovered handle matching every retained identity field.
+OWNER, SOURCE, ID, BASELINE and PATH are exact strings as recorded by the handle.
+Match both present and absent records before any recovery effects."
+  (unless (every (lambda (value) (and (stringp value) (plusp (length value))))
+                 (list owner source id baseline path))
+    (error 'worktree-identity-mismatch :operation :recovery :detail "Incomplete expected worktree identity"))
+  (multiple-value-bind (owned absent)
+      (discover-worktrees manager :owner owner :source source)
+    (flet ((matches-p (tree)
+             (and (equal owner (worktree-owner tree)) (equal source (worktree-source tree))
+                  (equal id (worktree-id tree)) (equal baseline (worktree-baseline tree))
+                  (equal path (worktree-path tree)))))
+      (let ((matches (remove-if-not #'matches-p (union owned absent :test #'eq))))
+        (unless (= (length matches) 1)
+          (error 'worktree-identity-mismatch :operation :recovery :detail "Owned worktree identity unavailable or changed"))
+        (recover-worktree manager (first matches) :owner owner)))))
 
 (defun cleanup-worktree (manager worktree &key owner discard-dirty)
   "Remove verified ownership, returning T or NIL on RETAIN-WORKTREE.
